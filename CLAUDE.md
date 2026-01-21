@@ -324,3 +324,290 @@ interpreter.ExecuteScript(script);
 - Performance optimization can wait until Unity integration
 - Keep the language simple - resist feature creep (no variables, no functions, no loops beyond implicit loop)
 - Test with the example scripts from the GDD to ensure they parse correctly
+
+---
+
+## Extending DroneScript
+
+The parser is designed to be extensible. Here's how to add new features:
+
+### Adding New Commands (Easy - 1 file)
+
+Commands like `goto_warehouse`, `scan_area`, `broadcast_message` are the easiest to add.
+
+**Changes needed: `Interpreter.cs` only**
+
+Add a new case in the `ExecuteCommand()` method's switch statement:
+
+```csharp
+case "goto_warehouse":
+    Log($"    [Simulation] Drone pathfinding to nearest warehouse...");
+    break;
+```
+
+**Example:** After adding this, the script `IF cargo_full THEN goto_warehouse` works immediately.
+
+**No changes needed to:**
+- Lexer (commands are just identifiers)
+- Parser (parses any identifier as a command)
+- Token types
+
+---
+
+### Adding New Query Conditions (2 files)
+
+Queries are boolean checks like `cargo_full`, `storm_active`, `low_fuel`.
+
+**Changes needed:**
+
+**1. `DroneState.cs` - Add the query logic:**
+
+```csharp
+// Add computed property
+public bool LowFuel => Battery < 20;
+
+// Update GetQueryValue() method
+public bool GetQueryValue(string queryName)
+{
+    return queryName.ToLower() switch
+    {
+        "cargo_full" => CargoFull,
+        "low_fuel" => LowFuel,  // ← Add this line
+        "storm_active" => StormActive,
+        // ... rest
+    };
+}
+```
+
+**2. (Optional) Add state property if needed:**
+
+```csharp
+public float FuelLevel { get; set; } = 100f;
+```
+
+**Example:** Now `IF low_fuel THEN goto_refuel` works!
+
+---
+
+### Adding New Variables (2 files)
+
+Variables are values used in comparisons like `battery`, `hp`, `cargo`.
+
+**Changes needed:**
+
+**1. `DroneState.cs` - Add property:**
+
+```csharp
+public float FuelLevel { get; set; } = 100f;
+```
+
+**2. `DroneState.cs` - Update `GetVariableValue()`:**
+
+```csharp
+public float GetVariableValue(string variableName)
+{
+    return variableName.ToLower() switch
+    {
+        "battery" => Battery,
+        "hp" => HP,
+        "cargo" => CargoAmount,
+        "fuel" => FuelLevel,  // ← Add this line
+        _ => throw new InvalidOperationException($"Unknown variable: {variableName}")
+    };
+}
+```
+
+**Example:** Now `IF fuel < 10 THEN goto_refuel` works!
+
+---
+
+### Adding New Operators (Complex - 5 files)
+
+**Example: Adding modulo operator `%`**
+
+This is more involved because operators are part of the grammar.
+
+**1. `Token.cs` - Add token type:**
+```csharp
+public enum TokenType
+{
+    // ... existing operators
+    Modulo,  // %
+}
+```
+
+**2. `Lexer.cs` - Tokenize the operator:**
+```csharp
+case '%':
+    AddToken(TokenType.Modulo);
+    break;
+```
+
+**3. `AST/Condition.cs` - Add to ComparisonOperator enum:**
+```csharp
+public enum ComparisonOperator
+{
+    // ... existing
+    Modulo  // %
+}
+```
+
+**4. `Parser.cs` - Handle in `ParseComparisonOrQuery()`:**
+```csharp
+if (Match(TokenType.LessThan, TokenType.LessThanEqual,
+          TokenType.GreaterThan, TokenType.GreaterThanEqual,
+          TokenType.Equal, TokenType.NotEqual,
+          TokenType.Modulo))  // ← Add this
+{
+    var operatorToken = Previous();
+    var comparisonOp = operatorToken.Type switch
+    {
+        // ... existing mappings
+        TokenType.Modulo => ComparisonOperator.Modulo,
+        // ...
+    };
+}
+```
+
+**5. `Interpreter.cs` - Implement evaluation in `EvaluateComparison()`:**
+```csharp
+bool result = comparison.Operator switch
+{
+    // ... existing operators
+    ComparisonOperator.Modulo => (int)leftValue % (int)rightValue == 0,
+    // ...
+};
+```
+
+**6. `Interpreter.cs` - Add to `FormatOperator()` for display:**
+```csharp
+private string FormatOperator(ComparisonOperator op)
+{
+    return op switch
+    {
+        // ... existing
+        ComparisonOperator.Modulo => "%",
+        // ...
+    };
+}
+```
+
+---
+
+### Adding New Keywords (Very Complex - 5+ files)
+
+**Example: Adding `WHILE` loops**
+
+Adding keywords like `WHILE`, `FOR`, `BREAK` requires extensive changes.
+
+**1. `Token.cs` - Add keyword token:**
+```csharp
+public enum TokenType
+{
+    // ... existing keywords
+    While,  // WHILE
+}
+```
+
+**2. `Lexer.cs` - Register keyword:**
+```csharp
+private static readonly Dictionary<string, TokenType> Keywords = new(StringComparer.OrdinalIgnoreCase)
+{
+    // ... existing
+    { "while", TokenType.While }
+};
+```
+
+**3. `AST/Statement.cs` - Add new statement type:**
+```csharp
+public record WhileStatement(
+    Condition Condition,
+    List<Command> Body,
+    int Line
+) : Statement;
+```
+
+**4. `Parser.cs` - Add parsing logic:**
+```csharp
+private Statement? ParseStatement()
+{
+    if (Match(TokenType.While))
+    {
+        return ParseWhileStatement();
+    }
+    // ... rest
+}
+
+private WhileStatement ParseWhileStatement()
+{
+    int line = Previous().Line;
+    var condition = ParseCondition();
+    // Parse body commands...
+    return new WhileStatement(condition, body, line);
+}
+```
+
+**5. `Interpreter.cs` - Add execution logic:**
+```csharp
+private bool ExecuteStatement(Statement statement)
+{
+    switch (statement)
+    {
+        // ... existing cases
+        case WhileStatement whileStmt:
+            while (EvaluateCondition(whileStmt.Condition))
+            {
+                foreach (var cmd in whileStmt.Body)
+                    ExecuteCommand(cmd);
+            }
+            return true;
+    }
+}
+```
+
+**Note:** Adding loops violates the GDD's "no loops beyond implicit loop" design principle. This is just an example of the complexity involved.
+
+---
+
+### Quick Reference: Complexity Chart
+
+| Feature Type | Files to Change | Difficulty | Est. Time |
+|--------------|-----------------|------------|-----------|
+| **New Command** | `Interpreter.cs` (1) | ⭐ Easy | 5 min |
+| **New Query** | `DroneState.cs` (1) | ⭐ Easy | 10 min |
+| **New Variable** | `DroneState.cs` (1) | ⭐ Easy | 10 min |
+| **New Operator** | 5 files | ⭐⭐⭐ Hard | 30 min |
+| **New Keyword** | 5+ files | ⭐⭐⭐⭐ Very Hard | 1-2 hours |
+| **New Argument Type** | 3 files | ⭐⭐ Medium | 20 min |
+
+---
+
+### Best Practices for Extensions
+
+**✅ DO:**
+- Add new commands freely - they're designed to be extensible
+- Test new features with similar test patterns from `Program.cs`
+- Add helpful log messages in the Interpreter for debugging
+- Keep commands lowercase with underscores (`goto_warehouse`, not `gotoWarehouse`)
+- Update test scripts to verify new features work correctly
+- Add XML documentation comments for new public methods
+
+**❌ DON'T:**
+- Add operators/keywords unless absolutely necessary (they're complex to maintain)
+- Hardcode command names in the Parser (keep it generic)
+- Forget to handle argument counts in Interpreter (`command.Arguments.Count` checks)
+- Skip error handling (queries/variables should throw helpful errors for unknown names)
+- Break case-insensitivity (always use `.ToLower()` in switch statements)
+
+---
+
+### Design Philosophy
+
+**Data-Driven Design:** DroneScript separates *syntax* (handled by Lexer/Parser) from *semantics* (handled by Interpreter). This means:
+- Commands are just identifiers to the parser - it doesn't validate if `goto_warehouse` is a "real" command
+- Only the Interpreter knows what commands do
+- Adding new commands = teaching the Interpreter, not changing the language grammar
+
+This design makes the system highly extensible for game development where new drone behaviors are frequently added.
+
+**Why This Matters:** In Unity, you can add 50 new drone commands without touching the parser. The parser's job is to understand structure (`IF condition THEN command`), not to validate game logic.
